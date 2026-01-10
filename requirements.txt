@@ -1,0 +1,27 @@
+# --- Core Math & Data Processing ---
+# Cần thiết cho tính toán ma trận và đại số gia tử (src/clustering.py)
+numpy>=2.1.0
+# Xử lý dữ liệu bảng (src/data_loader.py)
+pandas>=2.2.0
+# Các thuật toán hỗ trợ và metrics (src/clustering_metrics.py, classifier.py)
+scikit-learn>=1.6.0
+scipy>=1.14.0
+
+# --- Utilities ---
+# Thanh tiến trình cho batch processing (src/batch_processor.py)
+tqdm>=4.67.0
+# Quản lý memory và system info (src/batch_processor.py)
+psutil>=5.9.0
+# Lưu/Load model (thường đi kèm với sklearn)
+joblib>=1.5.0
+
+# --- Visualization (Optional) ---
+# Để vẽ biểu đồ trong các file example hoặc notebook
+matplotlib>=3.10.0
+seaborn>=0.13.0  # Note: 0.13.2 là version cao nhất hiện có cho Python 3.14 trên ARM
+
+# --- Testing & Development ---
+# Chạy test suite tốt hơn unittest mặc định (tests/)
+pytest>=8.3.0
+# Kiểm tra coverage code
+pytest-cov>=6.0.0
