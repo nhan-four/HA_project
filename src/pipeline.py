@@ -39,6 +39,7 @@ from .clustering import HedgeAlgebraClustering, ParameterOptimizer
 from .classifier import ClusterClassifier, PredictionResult
 from .batch_processor import BatchProcessor, MemoryConfig
 from .auto_cluster import AutoClusterPipeline, AutoClusterResult
+from .cache_utils import CacheManager, CleanConfig, SplitConfig, NormConfig, OptimConfig
 
 
 @dataclass
@@ -163,7 +164,11 @@ class HedgeAlgebraPipeline:
         log_level: str = 'INFO',
         log_to_file: bool = True,
         log_dir: str = 'logs',
-        center_init: str = 'ver6'
+        center_init: str = 'ver6',
+        use_cache: bool = False,
+        cache_dir: str = 'cache',
+        clean_version: int = 1,
+        min_per_class: int = 5
     ):
         """
         Khởi tạo HedgeAlgebraPipeline.
@@ -189,6 +194,10 @@ class HedgeAlgebraPipeline:
         self.test_size = test_size
         self.random_state = random_state
         self.center_init = center_init
+        self.use_cache = use_cache
+        self.cache_dir = cache_dir
+        self.clean_version = clean_version
+        self.min_per_class = min_per_class
         
         # Classifier
         if classifier is None:
@@ -215,7 +224,8 @@ class HedgeAlgebraPipeline:
         self,
         file_path: str,
         label_column: Optional[str] = None,
-        normalize_method: str = "minmax"
+        normalize_method: str = "minmax",
+        target_names: Optional[list] = None
     ) -> PipelineResult:
         """
         Chạy pipeline với file dữ liệu.
@@ -224,8 +234,9 @@ class HedgeAlgebraPipeline:
         
         Args:
             file_path: Đường dẫn file CSV hoặc NPY
-            label_column: Tên cột label (cho CSV, mặc định cột cuối)
-            normalize_method: Phương pháp chuẩn hóa ("minmax" hoặc "zscore")
+            label_column: Tên cột label (cho CSV, mặc định "label")
+            normalize_method: Phương pháp chuẩn hóa ("minmax" hoặc "zscore"/"standard")
+            target_names: Tên các class (optional, để hiển thị)
         
         Returns:
             PipelineResult: Kết quả của pipeline
@@ -241,20 +252,104 @@ class HedgeAlgebraPipeline:
         self.logger.info(f"   Số cụm: {self.n_clusters}")
         self.logger.info(f"   Sử dụng IG: {self.use_information_gain}")
         self.logger.info(f"   Tối ưu tham số: {self.optimize_parameters}")
+        self.logger.info(f"   Sử dụng cache: {self.use_cache}")
         self.logger.info("=" * 70)
         
-        # 1. Load và tiền xử lý dữ liệu
-        self.data_loader = DataLoader(log_level="INFO")
+        file_path_obj = Path(file_path)
+        if not file_path_obj.exists():
+            raise FileNotFoundError(f"Không tìm thấy file: {file_path}")
         
-        X_train, X_test, y_train, y_test, ig_weights = self.data_loader.load_and_preprocess(
-            file_path=file_path,
-            label_column=label_column,
-            normalize_method=normalize_method,
-            remove_constant=True,
-            calculate_ig=self.use_information_gain,
-            test_size=self.test_size,
-            random_state=self.random_state
-        )
+        # Set default label_column
+        if label_column is None:
+            label_column = "label"
+        
+        if self.use_cache:
+            # --- CACHE FLOW (Level A -> D -> B) ---
+            cm = CacheManager(file_path, cache_root=self.cache_dir)
+            
+            # Level A: Clean
+            c_cfg = CleanConfig(
+                label_column=label_column,
+                clean_version=self.clean_version,
+                nan_policy="fill0"
+            )
+            X_clean, y_raw, clean_h = cm.load_or_build_clean(c_cfg)
+            self.logger.info(f"✅ Level A (Clean): {X_clean.shape[0]} samples, {X_clean.shape[1]} features")
+            
+            # Level D: Split (Fair Comparison Key)
+            s_cfg = SplitConfig(
+                test_size=self.test_size,
+                random_state=self.random_state,
+                min_per_class=self.min_per_class
+            )
+            train_idx, test_idx, split_h = cm.load_or_build_split(y_raw, clean_h, s_cfg)
+            self.logger.info(f"✅ Level D (Split): {len(train_idx)} train, {len(test_idx)} test")
+            
+            # Level B: Normalize
+            # Map method name từ pipeline sang cache config
+            norm_method_map = "zscore" if normalize_method in ("zscore", "standard") else "minmax"
+            n_cfg = NormConfig(method=norm_method_map)
+            
+            # Hàm load_or_build_norm trả về (payload, norm_h)
+            data_norm, norm_h = cm.load_or_build_norm(X_clean, y_raw, train_idx, test_idx, split_h, n_cfg)
+            
+            X_train, X_test = data_norm["X_train"], data_norm["X_test"]
+            y_train, y_test = data_norm["y_train"], data_norm["y_test"]
+            
+            self.logger.info(f"✅ Level B (Normalize): Loaded from cache. Train shape: {X_train.shape}, Test shape: {X_test.shape}")
+            
+            # Tính IG weights nếu cần (chưa có trong cache, tính lại)
+            ig_weights = None
+            if self.use_information_gain:
+                self.data_loader = DataLoader(log_level="INFO")
+                ig_weights = self.data_loader.calculate_information_gain_ratio(X_train, y_train)
+                self.logger.info("✅ Information Gain Ratio calculated")
+        else:
+            # Fallback: Logic cũ không dùng cache
+            self.data_loader = DataLoader(log_level="INFO")
+            
+            X_train, X_test, y_train, y_test, ig_weights = self.data_loader.load_and_preprocess(
+                file_path=file_path,
+                label_column=label_column,
+                normalize_method=normalize_method,
+                remove_constant=True,
+                calculate_ig=self.use_information_gain,
+                test_size=self.test_size,
+                random_state=self.random_state
+            )
+            norm_h = None  # Không có hash khi không dùng cache
+        
+        # --- Level E Hook (Optimization) ---
+        if self.optimize_parameters:
+            if self.use_cache:
+                o_cfg = OptimConfig(
+                    center_init=self.center_init,
+                    n_clusters=self.n_clusters,
+                    theta_range=(0.01, 0.5, 0.01),
+                    alpha_range=(0.01, 0.5, 0.01)
+                )
+                
+                # Wrapper function để gọi optimizer cũ
+                def _run_optim(X, cfg):
+                    opt = ParameterOptimizer(
+                        center_init=cfg.center_init,
+                        theta_range=cfg.theta_range,
+                        alpha_range=cfg.alpha_range,
+                        log_level=self.log_level
+                    )
+                    # ParameterOptimizer.optimize trả về (theta, alpha, min_distance)
+                    return opt.optimize(X, cfg.n_clusters)
+                
+                self.theta, self.alpha, best_score = cm.load_or_build_best_params(
+                    X_train, norm_h, o_cfg, _run_optim
+                )
+                self.logger.info(f"✅ Level E (Optimization): theta={self.theta:.4f}, alpha={self.alpha:.4f} (Score: {best_score:.4f})")
+            else:
+                # Logic cũ: tối ưu trực tiếp
+                self.logger.info("\n📍 Tối ưu hóa tham số theta và alpha")
+                optimizer = ParameterOptimizer(log_level="INFO", center_init=self.center_init)
+                self.theta, self.alpha, min_distance = optimizer.optimize(X_train, self.n_clusters)
+                self.logger.info(f"   ✅ Tối ưu: θ={self.theta:.4f}, α={self.alpha:.4f}, Distance={min_distance:.4f}")
         
         # Chạy với dữ liệu đã load
         return self.run_with_data(
