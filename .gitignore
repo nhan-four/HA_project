@@ -36,6 +36,12 @@ ENV/
 # Logs
 logs/
 *.log
+nohup.out
+
+# Cache files
+cache/
+*.joblib
+*.npz
 
 # OS
 .DS_Store
