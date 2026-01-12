@@ -413,22 +413,51 @@ class AutoClusterPipeline:
         self.logger.info(f"   Số cụm: {self.min_clusters} → {self.max_clusters}")
         self.logger.info(f"   Tối ưu params: {self.optimize_params}")
         self.logger.info(f"   Selection metric: {selection_metric}")
+        self.logger.info(f"   Parallel jobs: {self.n_jobs}")
         self.logger.info("=" * 70)
         
         evaluations = []
-        cluster_range = range(self.min_clusters, self.max_clusters + 1)
+        cluster_range = list(range(self.min_clusters, self.max_clusters + 1))
         
-        for n_clusters in cluster_range:
-            self.logger.info(f"\n📍 Đang đánh giá {n_clusters} cụm...")
+        # Chạy song song nếu n_jobs > 1
+        if self.n_jobs > 1:
+            self.logger.info(f"\n🚀 Chạy song song với {self.n_jobs} workers...")
             
-            eval_result = self._evaluate_single_config(X, n_clusters)
-            evaluations.append(eval_result)
+            with ProcessPoolExecutor(max_workers=self.n_jobs) as executor:
+                # Submit tất cả các jobs
+                futures = {
+                    executor.submit(self._evaluate_single_config, X, n_clusters): n_clusters
+                    for n_clusters in cluster_range
+                }
+                
+                # Thu thập kết quả
+                for future in futures:
+                    n_clusters = futures[future]
+                    try:
+                        eval_result = future.result()
+                        evaluations.append(eval_result)
+                        self.logger.info(
+                            f"   ✅ {n_clusters} cụm: Silhouette={eval_result.silhouette_score:.4f}, "
+                            f"Distance={eval_result.total_distance:.4f}, Time={eval_result.training_time:.2f}s"
+                        )
+                    except Exception as e:
+                        self.logger.error(f"   ❌ {n_clusters} cụm failed: {e}")
             
-            self.logger.info(
-                f"   ✅ Silhouette: {eval_result.silhouette_score:.4f}, "
-                f"Distance: {eval_result.total_distance:.4f}, "
-                f"Time: {eval_result.training_time:.2f}s"
-            )
+            # Sắp xếp lại theo số cụm
+            evaluations.sort(key=lambda x: x.n_clusters)
+        else:
+            # Chạy tuần tự (n_jobs = 1)
+            for n_clusters in cluster_range:
+                self.logger.info(f"\n📍 Đang đánh giá {n_clusters} cụm...")
+                
+                eval_result = self._evaluate_single_config(X, n_clusters)
+                evaluations.append(eval_result)
+                
+                self.logger.info(
+                    f"   ✅ Silhouette: {eval_result.silhouette_score:.4f}, "
+                    f"Distance: {eval_result.total_distance:.4f}, "
+                    f"Time: {eval_result.training_time:.2f}s"
+                )
         
         # Chọn cấu hình tốt nhất
         if selection_metric == "silhouette":
